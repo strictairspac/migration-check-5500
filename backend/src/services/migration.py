@@ -1,10 +1,37 @@
-import json,hashlib,math
+import json,hashlib,math,re
 from decimal import Decimal,InvalidOperation
 from datetime import datetime,timezone,timedelta
 from src.constants.enums import TYPES
 class Cancelled(Exception):pass
 def digest(value):return hashlib.sha256(json.dumps(value,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
 def key_digest(row):return digest([row['sample_code'],row['test_name']])
+_WS=re.compile(r'\s+')
+def normalize_code(value):
+ """误收委托撤销按规范化委托号匹配：去全部空白并大写，保证 'js-001 ' 与 'JS001' 同号同清。"""
+ if value is None:return ''
+ return _WS.sub('',str(value)).upper()
+def code_fields(rules):
+ """该映射下指向 sample_code（委托号）的源字段名集合；多映射同号场景逐映射收集。"""
+ return {rule['source'] for rule in rules if isinstance(rule,dict) and rule.get('target')=='sample_code'}
+def source_code(row,fields):
+ """提取源行委托号原值；映射缺失时回退常见列名，再回退首个文本列。"""
+ for f in fields:
+  if f in row:return row[f]
+ for f in ('委托号','sample_code','code'):
+  if f in row:return row[f]
+ for v in row.values():
+  if isinstance(v,str):return v
+ return ''
+def row_matches_code(row,fields,normalized):
+ return normalize_code(source_code(row,fields))==normalized
+def filter_rows_by_codes(rows,fields,codes):
+ """按已生效撤销单的规范化委托号隔离源行；返回保留行与被清除行数。"""
+ if not codes:return list(rows),0
+ kept=[];dropped=0
+ for row in rows:
+  if normalize_code(source_code(row,fields)) in codes:dropped+=1
+  else:kept.append(row)
+ return kept,dropped
 def validate_rules(rules):
  if not isinstance(rules,list) or len(rules)!=5:raise ValueError('必须为五个目标字段各配置一条映射')
  targets=[]
@@ -65,11 +92,13 @@ def migrate(rows,rules,chunk_size,progress=lambda p:None):
 def make_backup(result,run_id,batch_name):
  return {'version':1,'run_id':run_id,'batch_name':batch_name,'rows':result['accepted_rows'],'row_hashes':result['row_hashes'],'checksum':result['checksum'],'kind':'logical-json-snapshot'}
 def validate_backup(backup,expected,run_id):
+ # expected 可为单个摘要，也可为当前摘要+撤销前祖先摘要链，任一完全匹配即通过（逐行摘要仍须自洽，篡改依旧拒绝）
+ allowed=(expected,) if isinstance(expected,str) else tuple(expected)
  if not isinstance(backup,dict) or backup.get('version')!=1 or backup.get('run_id')!=run_id or backup.get('kind')!='logical-json-snapshot':raise ValueError('备份版本或运行编号不一致')
  rows=backup.get('rows')
  if not isinstance(rows,list) or len(rows)>2000:raise ValueError('备份行数无效')
- if backup.get('checksum')!=digest(rows) or backup.get('checksum')!=expected:raise ValueError('备份checksum不匹配，拒绝恢复')
- if backup.get('row_hashes')!=[digest(r) for r in rows]:raise ValueError('逐行摘要不匹配')
+ if backup.get('checksum') not in allowed or backup.get('checksum')!=digest(rows):raise ValueError('备份checksum不匹配，拒绝恢复')
+ if backup.get('row_hashes')!=[digest(r) for r in rows]:raise ValueError('逐行摘要不匹配，篡改拒绝')
  if any(not isinstance(r,dict) or set(r)!=set(TYPES) for r in rows):raise ValueError('目标schema不一致')
  if len({key_digest(r) for r in rows})!=len(rows):raise ValueError('备份自然键重复')
  return rows

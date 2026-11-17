@@ -26,3 +26,5 @@ class RunInput(BaseModel):
  name:str=Field(min_length=2,max_length=120)
  mapping_id:int
 class RestoreInput(BaseModel):backup:dict
+class RevokeInput(BaseModel):
+ code:str=Field(min_length=1,max_length=160)

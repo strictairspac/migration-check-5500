@@ -32,3 +32,6 @@ target/
 *.o
 *.obj
 .DS_Store
+
+# 本地测试运行产生的 SQLite 数据库
+test-artifacts/**/*.db
